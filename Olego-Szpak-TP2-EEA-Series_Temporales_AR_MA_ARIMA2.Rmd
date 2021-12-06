@@ -1,0 +1,455 @@
+---
+title: 'Series Temporales - ARIMA '
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+# Motivación
+
+Una serie temporal es una secuencia de datos discretos en el tiempo, equidistantes. El forecasting de series temporales se refiere al uso de un modelo para predecir valores futuros basados en los valores previamente observados. En anteriores trabajos se detalló el uso de modelos lineales generalizados aditivos para poder trabajar con series temporales, como por ejemplo *Prophet*, por lo que en el siguiente,  se presentará la teoría necesaria para poder enteder e implementar los modelos AR, MA y ARIMA, en conjunto con  un caso práctico con código. 
+
+El caso que se analizará  es un dataset  publicado en Rpubs de la ocupación de pasajes aéroes (cantidad de pasajeros que volaron) por mes desde 1949 a 1960. Se tomará como referencias y bases de investigación a:
+
+* ["Air Passengers Occupancy Prediction Using Arima Model, International Journal of Applied Engineering Research"][paper]
+
+* ["Forecasting: Principles and Practice", Hyndam and Athanasopoulos][libro] 
+
+* ["Kaggle - Time Series Analysis , Dileep 2019"][kaggle]
+
+
+
+```{r message=FALSE}
+#install.packages("tsibble")
+library(tsibble)
+#install.packages("feasts")
+library(feasts)
+library(tidyverse)
+library(openintro)
+library(GGally)
+library(corrr)
+library(knitr)
+library(tidymodels)
+library(gridExtra)
+library(rsample)
+library(ggplot2)
+library(GGally)
+library(RColorBrewer)
+library(ggcorrplot)
+library(forcats)
+library(robustbase)
+library(fpp3)
+library(tseries)
+library(slider)
+library(forecast)
+```
+# Primeros Pasos
+## Levantamos el dataset a analizar. 
+
+El dataset cuenta con dos variables, la temporal referida al año y mes y luego la variable de cantidad de pasajeros que representa nuestro *y*.
+```{r}
+df <-  read.csv("~/Documents/Data-Mining/EEA/TP2/data/AirPassengers.csv")
+
+head(df)
+```
+
+Como primer paso, es necesario transformar el dataset en un objeto tsibble para poder analizarlo como serie temporal. 
+```{r}
+df <- df  %>% mutate(Month = yearmonth(Month)) %>% as_tsibble(index= Month)
+```
+
+## Visualización
+Antes de comenzar algún análisis visualizemos el grafico de cantidad de pasajeros en función del tiempo. Del gráfico se pueden notar varios puntos:
+*Existe una tendencia creciente, es decir que vemos que el valor medio de cantidad de pasajeros aumenta a medida que aumenta el tiempo. 
+*La variación aumenta a medida que crece el tiempo. 
+```{r}
+
+autoplot(df, X.Passengers) +
+  labs(title = "Cantidad de Pasajeros", y = "# Pasajeros", x = "Mes")
+```
+## Componentes de una Serie Temporal
+Si bien en este trabajo no se utilizará GAM y Prophet como modelo, es util para poder enteder las componentes. Estos representan la serie como un modelo aditivo propuesto por Harvey & Peters (1990):
+\begin{equatio}
+$y(t) = S(t) + T(t) + R(t) + \epsilon_t$ : 
+\end{equation}
+donde,
+*$y(t)$ es la variable a predecir,
+*$S(t)$ es la componente de seasonality (estacionalidad). Es un patrón que ocurre por factores estacionales, siempre de un período fijo y conocido. No confundir con __ciclo__ que ocurre cuando existe un patrón de datos de aumento y disminución que no son de una frecuencia fija. 
+*$T(t)$ es la componente de tendencia. Representa un aumento o disminución a largo plazo en los datos.
+*$R(t)$ es la componente remanente, que puede representar  efectos atípicos.
+*$\epsilon_t$ es el error del modelo en la predicción de $y_t$. 
+
+Estas componentes podemos verlas utilizando los siguientes comandos:´
+
+
+```{r}
+dcmp <- df %>%
+  model(stl = STL(X.Passengers))
+
+#components(dcmp) %>%
+#  as_tsibble() %>% autoplot()
+#  autoplot(X.Passengers, colour="gray") +
+#  geom_line(aes(y=trend), colour = "#D55E00") +
+#  labs(
+#    y = "Cantidad de Pasajeros", x= "Mes")
+
+components(dcmp) %>% autoplot()
+```
+Como se puede visualizar en el anterio gráfico, los puntos mencionados anteriormente se comprueban. La tendencia es creciente, y vemos en la seasonality que la varianza aumenta a lo largo del tiempo. Esto luego nos interesará más adelante cuando hablemos de **estacionariedad** (*stacionarity*).
+
+Muchas veces, para poder eliminar parte de la aleatoriedad de los datos se los suaviza con distintas técnicas. En anteriores trabajos se vio **loess**, que suaviza por medio de un ajuste por regresión polinómica local. En este, vamos a proponer otro método de suavizado: **Medias Móviles** (*moving average smoothing*). La idea detrás sería utilizar:
+
+\begin{equation}
+\hat{T} = \frac{1}{2k+1}\sum_{j=-k}^{k}y_t+j
+\end{equation}
+
+De forma análoga existe el **Rolling Average**, que se diferencia en un suavizado tomando ventanas no simétricas, por ejemplo solamente tomando _j=0,-1,-2_. 
+Visualizemos estos suavizados.
+
+```{r,results=FALSE}
+df_movil <- df %>%
+    mutate(
+    "k_1" = slider::slide_dbl(X.Passengers, mean,
+                .before = 1, .after = 1, .complete = TRUE)
+  )
+
+df_movil <- df_movil %>%
+    mutate(
+    "k_3_rolling" = slider::slide_dbl(X.Passengers, mean,
+                .before = 2, .after = 0, .complete = TRUE)
+  )
+
+df_movil <- df_movil %>%
+    mutate(
+   "k_2" = slider::slide_dbl(X.Passengers, mean,
+                .before = 2, .after = 2, .complete = TRUE)
+  )
+
+df_movil <- df_movil %>%
+    mutate(
+   "k_5" = slider::slide_dbl(X.Passengers, mean,
+                .before = 5, .after = 5, .complete = TRUE)
+  )
+
+```
+
+```{r}
+
+  colors <- c("X.Passengers" = "black", "k_1" = "blue", "k_3_rolling" = "orange", "k_2"="green","k_5"="red")
+
+df_movil %>%
+  autoplot(X.Passengers, colour = "black") +
+  geom_line(aes(y = k_1), colour = "blue") +
+  geom_line(aes(y = k_3_rolling), colour = "orange") +
+  geom_line(aes(y = k_2), colour = "green") +
+  geom_line(aes(y = k_5), colour = "red") +
+  labs(y  = "Cantidad de Pasajeros", x= "Mes")+ 
+  scale_color_manual(values=colors)#,labels=c("Pasajeros","k_1","k_3_rolling","k_2","k_5"))
+```
+
+
+# Conceptos Modelos AR, MA, ARIMA
+
+## Autocorrelacion
+
+La autocorrelacion cuantifica la relación lineal entre los valores de una serie y sus k valores anteriores. Cuantifica la similaridad entre la serie y una versión de ella misma en una ventana temporal anterior sobre sucesivos intervalos. Matemáticamente se expresa como:
+
+\begin{equation}
+r_k = \frac{\sum_{t=k+1}^{T}(y_t - \bar{y})(y_{t-k} - \bar{y})}{\sum_{t=1}^{T}(y_t-\bar{y})^2}
+T: length de la serie,
+\bar{y}: media de y
+k: lag
+\end{equation}
+
+La función de autocorrelación (**ACF**) generaliza este coeficiente. Los efectos de tendencia y estacionalidad influyen fuertemente en la autocorrelación, y como podemos ver más adelante en la visualización de la ACF, cada 12 meses siempre hay un pico y vemos que a medida que aumenta el lag disminuye la autocorrelación. 
+
+```{r}
+df %>%
+  ACF(X.Passengers, lag_max = 48) %>%
+  autoplot() + labs(title="ACF",x='Lag en Meses',y='ACF')
+```
+## Estacionariedad (stacionarity)
+Una vez entendidos los anteriores conceptos, podemos explicar la **Estacionariedad** (más sencillo stacionarity, en inglés para evitar confusiones con la estacionalidad). 
+Una serie temporal es estacionaria si las propiedades de la misma no depende del tiempo en que es observada. Es decir, que no es afectada ni por tendencia ni por estacionalidad. Para que una serie sea estacionaria debe satisfacer:
+
+1. La media de la serie temporal debe ser constante a través del tiempo.
+2. La varianza de la serie temporal debe ser constante a través del tiempo.
+3. La autocorrelación no debe variar con el tiempo.
+
+Si bien visualmente se ve que esto no sucede hay dos tests para poder comprobarlo. ADF y KPSS.
+
+```{r}
+adf.test(df$X.Passengers,k = 0) #--> da 0.01
+
+kpss.test(df$X.Passengers)
+
+```
+
+Para sacar tendencia puedo restar el valor pasado. Veamos como queda visualmente
+```{r}
+
+df_diff <- df %>% mutate(diff_passengers = difference(X.Passengers)) 
+
+df %>%
+  gg_tsdisplay(difference(X.Passengers), plot_type='partial')
+```
+
+Claramente influye el problema que la varianza es mayor a medida que aumenta el tiempo, por lo que tengo que realizar una transformacion Box-Cox primero. 
+```{r}
+#df %>% autoplot(X.Passengers)
+lambda <- BoxCox.lambda(df$X.Passengers)
+
+#df%>%
+#  autoplot(BoxCox(X.Passengers,lambda), colour = "black") 
+
+
+df_diff <- df %>% mutate(diff_passengers = difference(BoxCox(X.Passengers,lambda),1)) 
+
+df_diff %>%
+  gg_tsdisplay(diff_passengers, plot_type='partial')
+
+```
+
+Y si en vez de restar el anterior uso una resta por media movil
+
+```{r}
+df_movil_diff <- df %>%
+    mutate(
+    "tres" = slider::slide_dbl(X.Passengers, mean,
+                .before = 5, .after = 5, .complete = TRUE)
+  )
+
+df_movil_diff <- df_movil_diff %>% mutate(diff = BoxCox(X.Passengers,lambda)-BoxCox(tres,lambda)) 
+
+df_movil_diff %>%
+  gg_tsdisplay(diff, plot_type='partial')
+
+```
+
+Finalmente decido hacer boxcox y diferenciacion.
+
+```{r}
+
+lambda <- BoxCox.lambda(df$X.Passengers)
+
+
+df_diff <- df %>% mutate(boxcox_passengers = (BoxCox(X.Passengers,lambda))) 
+
+
+df_diff <- df_diff %>% mutate(diff_passengers = difference(BoxCox(X.Passengers,lambda))) 
+
+
+#Separo en Train y Test para los modelos
+
+train_ts_ds_diff = df_diff %>% slice(-(133:144))
+test_ts_ds_diff = df_diff %>% slice(133:144)
+
+train_ts_ds = df %>% slice(-(133:144))
+test_ts_ds = df %>% slice(133:144)
+
+myts_diff <- ts(train_ts_ds_diff$diff_passengers, start=c(1949, 1), end=c(1959, 12), frequency=12)
+```
+
+
+
+
+
+# Modelos
+
+## Modelo Auto Regresivo (AR)
+
+En este modelo se usa los valores pasados de la variable para predecir el siguiente. Tiene como parametro **p** que regula la cantidad de valores en el pasado que se consideran. 
+
+\begin{equation}
+y_t = c+ \phi_1 y_{t-1} + \phi_2 y_{t-2} + ... + \phi_p y_{t-p} + \epsilon_t
+\end{equation}
+
+Los valores de los coeficientes $\phi_i$ seran cercanos a +1 si en $y_{t-i}$ la serie copia al valor. Por el contrario, en caso que los coeficientes sean cercanos a $-1$ se implica que la serie se está autoregulando, por ejemplo valores de acciones de subas que se compensan con bajas.
+
+
+
+### Ejemplo de Modelo AR
+
+```{r}
+#AR (11,1,0) con diff
+#fit_train_ar_210_diff = arima(x = (train_ts_ds_diff$diff_passengers),seasonal = F, order = c(11, 0, 0))
+fit_train_ar_210_diff = ar(x = (train_ts_ds_diff$diff_passengers[-1]),order.max = 8,aic = FALSE)
+predict_ar_210_diff <- predict(fit_train_ar_210_diff, n.ahead=12)
+
+
+test_ts_ds_diff$prediccion_ar_210 = predict_ar_210_diff$pred
+
+pred_diff_ar_210 = append(train_ts_ds_diff[132,]$diff_passengers,predict_ar_210_diff$pred)
+
+
+#Grafico Transformado
+
+#ggplot() + geom_line(data=df_diff, aes(x=Month,y=diff_passengers)) + geom_line(data=test_ts_ds_diff,aes(x=Month,y=prediccion_ar_210),color='blue')
+
+
+#Grafico invirtiendo todo
+pred_inv_diff_ar_210 <-c()
+pred_inv_diff_ar_210[1] <- train_ts_ds_diff$boxcox_passengers[132]
+for(i in 2:length(pred_diff_ar_210)){
+  pred_inv_diff_ar_210[i] <- pred_inv_diff_ar_210[i-1]+pred_diff_ar_210[i]
+}
+pred_transformed_ar_210 <- InvBoxCox(pred_inv_diff_ar_210,lambda)
+
+
+
+
+test_ts_ds_diff$prediccion_transformada_ar_210 = pred_transformed_ar_210[2:13]
+
+
+
+ggplot() + geom_line(data=df_diff, aes(x=Month,y=X.Passengers)) + geom_line(data=test_ts_ds_diff,aes(x=Month,y=prediccion_transformada_ar_210),color='blue')  
+```
+
+### Analisis Residuos 
+```{r}
+
+checkresiduals(fit_train_ar_210_diff)
+
+
+```
+
+## Modelo Medias Moviles (MA)
+
+En el modelo de medias moviles se predice teniendo en cuenta los residuos pasados. El parametro **q** regula la cantidad de términos de errores que se consideran. Soluciona los problemas del modelo AR para captar cambios bruscos.
+
+\begin{equation}
+y_t = c+ \epsilon_t + \phi_1 y_{t-1} + \phi_2 y_{t-2} + ... + \phi_p y_{t-p} + \epsilon_t
+\end{equation}
+
+### Ejemplo de Modelo MA
+
+
+```{r}
+#MA (0,1,11) con diff
+#fit_train_ma_014_diff = ar(x = (train_ts_ds_diff$diff_passengers),order = c(0, 0, 11))
+fit_train_ma_014_diff <- arima(x=(train_ts_ds_diff$diff_passengers), order=c(0,0,11), seasonal = list(order = c(0,0,0)))
+predict_ma_014_diff <- predict(fit_train_ma_014_diff, n.ahead=12)
+
+
+test_ts_ds_diff$prediccion_ma_014 = predict_ma_014_diff$pred
+
+pred_diff_ma_014 = append(train_ts_ds_diff[132,]$diff_passengers,predict_ma_014_diff$pred)
+
+
+#Grafico Transformado
+
+#ggplot() + geom_line(data=df_diff, aes(x=Month,y=diff_passengers)) + geom_line(data=test_ts_ds_diff,aes(x=Month,y=prediccion_ma_014),color='blue')
+
+
+#Grafico invirtiendo todo
+pred_inv_diff_ma_014 <-c()
+pred_inv_diff_ma_014[1] <- train_ts_ds_diff$boxcox_passengers[132]
+for(i in 2:length(pred_diff_ma_014)){
+  pred_inv_diff_ma_014[i] <- pred_inv_diff_ma_014[i-1]+pred_diff_ma_014[i]
+}
+pred_transformed_ma_014 <- InvBoxCox(pred_inv_diff_ma_014,lambda)
+
+
+
+
+test_ts_ds_diff$prediccion_transformada_ma_014 = pred_transformed_ma_014[2:13]
+
+
+
+ggplot() + geom_line(data=df_diff, aes(x=Month,y=X.Passengers)) + geom_line(data=test_ts_ds_diff,aes(x=Month,y=prediccion_transformada_ma_014),color='blue') 
+
+
+```
+
+
+## Modelo ARIMA
+
+El modelo ARIMA ( _Auto Regressive Integrated Moving Average_ ) combina ambos modelos. 
+
+\begin{equation}
+y_t  = c +\phi_1 y^{\prime}_{t-1} + \phi_2 y^{\prime}_{t-2} + ... + \phi_p y^{\prime}_{t-p}  +   
+  \theta_1 \epsilon_{t-1} + \theta_2 \epsilon_{t-2} + ... + \theta_q \epsilon_{t-q} + \epsilon_t 
+\end{equation}
+
+Depende de tres párametros **(p,d,q)**, siendo __p__ y __q__ los mencionados anteriormente para AR y MA respectivamente, y d que permite regular el shift de diferenciación. Permite captar lo mejor de ambos modelos ya que permite compensar de errores anteriores (MA) y a su vez, mantener la similaridad de valores anteriores (AR).
+
+
+### Ejemplo ARIMA 
+```{r}
+
+fit_am_diff = auto.arima(myts_diff, seasonal =F, ic ="aic", trace=TRUE)
+forecast_diff<-predict(fit_am_diff, n.ahead=12)
+pred_con_ult_train_diff = append(train_ts_ds_diff[132,]$diff_passengers,forecast_diff$pred)
+
+
+#Grafico Transformado
+test_ts_ds_diff$prediccion <- pred_con_ult_train_diff[-1]
+
+#ggplot() + geom_line(data=df_diff, aes(x=Month,y=diff_passengers)) + geom_line(data=test_ts_ds_diff,aes(x=Month,y=prediccion),color='blue')
+
+
+#Grafico invirtiendo todo
+pred_inv_diff <-c()
+pred_inv_diff[1] <- train_ts_ds_diff$boxcox_passengers[132]
+for(i in 2:length(pred_con_ult_train_diff)){
+  pred_inv_diff[i] <- pred_inv_diff[i-1]+pred_con_ult_train_diff[i]
+}
+pred_transformed <- InvBoxCox(pred_inv_diff,lambda)
+
+
+
+
+test_ts_ds_diff$prediccion_transformada = pred_transformed[2:13]
+
+
+
+ggplot() + geom_line(data=df_diff, aes(x=Month,y=X.Passengers)) + geom_line(data=test_ts_ds_diff,aes(x=Month,y=prediccion_transformada),color='blue')  
+```
+
+
+## Modelo S-ARIMA (Seasonal ARIMA)
+
+S-ARIMA permite complementar el modelo ARIMA agregando análisis estacional. En este caso además de los parámetros **(p,d,q)** no estacionales, se le agregan **(P,D,Q)_m** estacionales. Para este ya no es necesario realizar las transformaciones anteriores ya que los parametros pueden captar esta información.
+
+
+### Ejemplo S-ARIMA
+```{r}
+#fiteo con autoarima sin dif ni log para que capte el seasonal
+
+myts <- ts(train_ts_ds$X.Passengers, start=c(1949, 1), end=c(1959, 12), frequency=12)
+fit_am = auto.arima(myts, seasonal = T, ic ="aic", trace=TRUE)
+
+#fit_train_autoarima = auto.arima(ts(train_ts_ds$Passengers), seasonal = T, ic ="aic", trace=TRUE)
+forecast_3<-forecast(fit_am, h=12, level=c(95))
+
+
+predict_3<-predict(fit_am, n.ahead=12)
+
+pred_con_ult_train_3 = append(train_ts_ds[132,]$X.Passengers,predict_3$pred)
+
+
+
+test_ts_ds$prediccion <- pred_con_ult_train_3[-1]
+
+ggplot() + geom_line(data=df, aes(x=Month,y=X.Passengers)) + geom_line(data=test_ts_ds,aes(x=Month,y=prediccion),color='blue')
+
+
+```
+
+### Analisis Residuos S-ARIMA
+```{r}
+
+checkresiduals(fit_am)
+
+
+```
+
+
+
+
+# Referencias
+[libro]: https://otexts.com/fpp3/ "“Forecasting: Principles and Practice”, Hyndam and Athanasopoulos"
+[kaggle]: https://www.kaggle.com/dileep070/time-series-anasysis/notebook "Kaggle - Time Series Analysis , Dileep 2019"
+[paper]: https://www.ripublication.com/ijaer19/ijaerv14n3_08.pdf "Air Passengers Occupancy Prediction Using Arima Model, International Journal of Applied Engineering Research"
+
